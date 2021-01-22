@@ -391,11 +391,11 @@ finalweight_lbs <-  cbind(sum(finalweight$weight_lbs), sum(finalweight$weight_to
 ```
 \newpage
 
-```{r}
+```{r, warning=FALSE, echo=FALSE}
 
 library(knitr)
 
-kable(finalweight[, c(1,8:10)])
+kable(finalweight[, c(1,9:11)])
 
 
 all_table <- data.frame(colSums(finalweight[c(9:11)]))
