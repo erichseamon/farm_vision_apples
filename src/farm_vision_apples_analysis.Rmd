@@ -1,0 +1,413 @@
+---
+title: "Farm Vision Apples Analysis"
+author: "Erich Seamon"
+date: "1/22/2021"
+output: pdf_document
+---
+
+## Summary
+
+The following code loads all data (calibration and actual scan data), bootstraps the calibration data's H/W and HW ratios, then uses the sample mean distributions per row to estimate HW ratios for all scan observations (even rows use nearest odd row's calibration sample distribution).  Using this sampled HW ratio, we then calculate a volume of an oblate ellipsoid, using the radius the major axis (width), an estimating height.  We then use literature an estimated density calculation (0.8 g/cm3) to estimate yields per row, per cultivar, and total overall.
+
+```{r, warning=FALSE, echo=FALSE}
+library(plyr)
+library(sp)
+library(uncertainty)
+library(pdqr)
+library(magrittr)
+
+options(scipen=999)
+options(warn=-1)
+
+
+#set local workspace
+setwd("/mnt/lfs2/erichs/git/farm_vision_apples/data")
+
+#load list of gala files
+temp = list.files(pattern="b-gala")
+
+#separate even and odd files
+even_gala <- temp[c(1,3,5,7,9)]
+odd_gala <- temp[c(2,4,6,8,10)]
+
+#load list of honeycrisp files
+temp = list.files(pattern="b-honeycrisp")
+
+#separate even and odd files
+odd_honeycrisp <- temp[c(1,3,5,7)]
+even_honeycrisp <- temp[c(2,4,6,8)]
+
+#load calibration dataset
+calibration <- read.csv("hand-counts-and-sizes.csv", header=TRUE)
+
+#oblate ellipsoid calibration calculation
+calibration$west_A_volume <- (4/3 *pi * calibration$west_width_A^2 * calibration$west_height_A)
+calibration$west_B_volume <- (4/3 *pi * calibration$west_width_B^2 * calibration$west_height_B)
+calibration$west_C_volume <- (4/3 *pi * calibration$east_width_C^2 * calibration$east_height_C)
+calibration$west_D_volume <- (4/3 *pi * calibration$east_width_D^2 * calibration$east_height_D)
+
+#initial calibration volume uncertainty 
+
+#calculate calibration uncertainty for volume
+calibration$uncertainty <- sqrt(rowSums((calibration[12:15] - rowMeans(calibration[12:15]))^2)/4)
+
+#calculate calibration uncertainy +/- percentage
+calibration$uncertainty_pct <- calibration$uncertainty / rowMeans(calibration[12:15]) 
+
+
+
+#Calculate Ratios for Height/Width
+
+#calculate calibration H/W ratio
+calibration$ratio_west_A <- calibration$west_height_A/calibration$west_width_A
+calibration$ratio_west_B <- calibration$west_height_B/calibration$west_width_B
+calibration$ratio_east_C <- calibration$east_height_C/calibration$east_width_C
+calibration$ratio_east_D <- calibration$east_height_D/calibration$east_width_D
+
+
+#initial calibration ratio uncertainty
+
+#calculate calibration uncertainty for ratio
+calibration$uncertainty <- sqrt(rowSums((calibration[12:15] - rowMeans(calibration[12:15]))^2)/4)
+
+#calculate calibration uncertainy +/- percentage
+calibration$uncertainty_pct <- calibration$uncertainty / rowMeans(calibration[12:15]) 
+
+
+#----------------
+
+
+#BEGIN Even row calibration MERGE
+
+
+even_gala_calibration <- NULL
+even_gala_final <- NULL
+for (i in even_gala) {
+  ii <- gsub('.{11}$', '', i)
+    row <- read.csv(i, header=TRUE, strip.white = TRUE)
+    row$radius.in.mm <- row$radius.in.mm * 1000
+    row_ontree <- row[row$height.off.ground > 0,]
+    row_ontree_true <- subset(row_ontree, in.calibration.sample == "True")
+    
+    set.seed(101)
+    cal <- calibration[calibration$name == ii,]
+    # Using ordinary bootstrap
+    r_dis_mean <- as.numeric(cal[,c(18,19,20,21)]) %>% 
+      new_r(type = "continuous") %>% 
+      form_estimate(stat = mean, sample_size = cal[,3])
+    
+    ci <- summ_quantile(r_dis_mean,probs = c(.05,.95))
+    
+    row_ontree$ratio_est_top <- ci[1]
+    row_ontree$ratio_est_bottom <- ci[2]
+    row_ontree$ratio_est <- r_dis_mean(nrow(row_ontree))
+    row_ontree$height_est <- (row_ontree$radius.in.mm * row_ontree$ratio_est)
+    row_ontree$height_est_top <- (row_ontree$radius.in.mm * row_ontree$ratio_est_top)
+    row_ontree$height_est_bottom <- (row_ontree$radius.in.mm * row_ontree$ratio_est_bottom)
+    
+    row_ontree$volume <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est)
+    row_ontree$volume_top <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est_top)
+    row_ontree$volume_bottom <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est_bottom)
+    row_ontree$name <- ii
+    even_gala_final <- rbind(even_gala_final, row_ontree)
+    
+    odd_row_sp <- SpatialPointsDataFrame(cbind.data.frame(row_ontree$lat, row_ontree$lon),  row_ontree)
+    odd_row_sp_true <- SpatialPointsDataFrame(cbind.data.frame(row_ontree_true$lat, row_ontree_true$lon),  row_ontree_true)
+    row_ontree_true_E <- row_ontree_true[row_ontree_true$side == "E",]
+    row_ontree_true_W <- row_ontree_true[row_ontree_true$side == "W",]
+    
+    calibration_row <- calibration[calibration$name == ii,]
+    df.expanded_E <- calibration_row[rep(row.names(calibration_row), nrow(row_ontree_true_E)), ]
+    df.expanded_W <- calibration_row[rep(row.names(calibration_row), nrow(row_ontree_true_W)), ]
+    
+    row_calibration_combined_E <- cbind(row_ontree_true_E, df.expanded_E)
+    row_calibration_combined_W <- cbind(row_ontree_true_W, df.expanded_W)
+    
+    row_calibration_combined_W$height <- (row_calibration_combined_W$radius.in.mm * rowMeans(row_calibration_combined_W[27:28]))
+    row_calibration_combined_E$height <- (row_calibration_combined_E$radius.in.mm * rowMeans(row_calibration_combined_E[29:30]))
+    
+    row_calibration_combined_E$volume <- ((4/3) * pi * row_calibration_combined_E$radius.in.mm * row_calibration_combined_E$radius.in.mm * row_calibration_combined_E$height)
+    row_calibration_combined_W$volume <- ((4/3) * pi * row_calibration_combined_W$radius.in.mm * row_calibration_combined_W$radius.in.mm * row_calibration_combined_W$height)
+    gala_cal <- rbind(row_calibration_combined_E,row_calibration_combined_W)
+    even_gala_calibration <- rbind(even_gala_calibration, gala_cal)
+    
+  
+}
+
+
+
+
+
+even_honeycrisp_calibration <- NULL
+even_honeycrisp_final <- NULL
+for (i in even_honeycrisp) {
+  ii <- gsub('.{11}$', '', i)
+  row <- read.csv(i, header=TRUE, strip.white = TRUE)
+  row$radius.in.mm <- row$radius.in.mm * 1000
+  row_ontree <- row[row$height.off.ground > 0,]
+  row_ontree_true <- subset(row_ontree, in.calibration.sample == "True")
+  
+  set.seed(101)
+  cal <- calibration[calibration$name == ii,]
+  # Using ordinary bootstrap
+  r_dis_mean <- as.numeric(cal[,c(18,19,20,21)]) %>% 
+    new_r(type = "continuous") %>% 
+    form_estimate(stat = mean, sample_size = cal[,3])
+  
+  ci <- summ_quantile(r_dis_mean,probs = c(.05,.95))
+  
+  row_ontree$ratio_est_top <- ci[1]
+  row_ontree$ratio_est_bottom <- ci[2]
+  row_ontree$ratio_est <- r_dis_mean(nrow(row_ontree))
+  row_ontree$height_est <- (row_ontree$radius.in.mm * row_ontree$ratio_est)
+  row_ontree$height_est_top <- (row_ontree$radius.in.mm * row_ontree$ratio_est_top)
+  row_ontree$height_est_bottom <- (row_ontree$radius.in.mm * row_ontree$ratio_est_bottom)
+  
+  row_ontree$volume <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est)
+  row_ontree$volume_top <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est_top)
+  row_ontree$volume_bottom <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est_bottom)
+  row_ontree$name <- ii
+  even_honeycrisp_final <- rbind(even_honeycrisp_final, row_ontree)
+  
+  #odd_row_sp <- SpatialPointsDataFrame(cbind.data.frame(row_ontree$lat, row_ontree$lon),  row_ontree)
+  #odd_row_sp_true <- SpatialPointsDataFrame(cbind.data.frame(row_ontree_true$lat, row_ontree_true$lon),  row_ontree_true)
+  row_ontree_true_E <- row_ontree_true[row_ontree_true$side == "E",]
+  row_ontree_true_W <- row_ontree_true[row_ontree_true$side == "W",]
+  
+  calibration_row <- calibration[calibration$name == ii,]
+  df.expanded_E <- calibration_row[rep(row.names(calibration_row), nrow(row_ontree_true_E)), ]
+  df.expanded_W <- calibration_row[rep(row.names(calibration_row), nrow(row_ontree_true_W)), ]
+  
+  row_calibration_combined_E <- cbind(row_ontree_true_E, df.expanded_E)
+  row_calibration_combined_W <- cbind(row_ontree_true_W, df.expanded_W)
+  
+  row_calibration_combined_W$height <- (row_calibration_combined_W$radius.in.mm * rowMeans(row_calibration_combined_W[27:28]))
+  row_calibration_combined_E$height <- (row_calibration_combined_E$radius.in.mm * rowMeans(row_calibration_combined_E[29:30]))
+  
+  row_calibration_combined_E$volume <- ((4/3) * pi * row_calibration_combined_E$radius.in.mm * row_calibration_combined_E$radius.in.mm * row_calibration_combined_E$height)
+  row_calibration_combined_W$volume <- ((4/3) * pi * row_calibration_combined_W$radius.in.mm * row_calibration_combined_W$radius.in.mm * row_calibration_combined_W$height)
+  honeycrisp_cal <- rbind(row_calibration_combined_E,row_calibration_combined_W)
+  even_honeycrisp_calibration <- rbind(even_honeycrisp_calibration, honeycrisp_cal)
+  
+  
+}
+
+
+
+#BEGIN odd row 
+
+
+odd_gala_final <- NULL
+for (i in odd_gala) {
+  ii <- gsub('.{11}$', '', i)
+  row <- read.csv(i, header=TRUE, strip.white = TRUE)
+  row$radius.in.mm <- row$radius.in.mm * 1000
+  row_ontree <- row[row$height.off.ground > 0,]
+  row_ontree_true <- subset(row_ontree, in.calibration.sample == "True")
+  
+  
+  iii <- as.numeric(strsplit(ii, "\\D+")[[1]][-1])
+  iii <- iii+1
+  iii <- paste(gsub("\\d+", "", ii), iii, sep="")
+  
+  
+  set.seed(101)
+  cal <- calibration[calibration$name == iii,]
+  # Using ordinary bootstrap
+  r_dis_mean <- as.numeric(cal[,c(18,19,20,21)]) %>% 
+    new_r(type = "continuous") %>% 
+    form_estimate(stat = mean, sample_size = cal[,3])
+  
+  
+  ci <- summ_quantile(r_dis_mean,probs = c(.05,.95))
+  
+  row_ontree$ratio_est_top <- ci[1]
+  row_ontree$ratio_est_bottom <- ci[2]
+  row_ontree$ratio_est <- r_dis_mean(nrow(row_ontree))
+  row_ontree$height_est <- (row_ontree$radius.in.mm * row_ontree$ratio_est)
+  row_ontree$height_est_top <- (row_ontree$radius.in.mm * row_ontree$ratio_est_top)
+  row_ontree$height_est_bottom <- (row_ontree$radius.in.mm * row_ontree$ratio_est_bottom)
+  
+  row_ontree$volume <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est)
+  row_ontree$volume_top <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est_top)
+  row_ontree$volume_bottom <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est_bottom)
+  row_ontree$name <- ii
+  odd_gala_final <- rbind(odd_gala_final, row_ontree)
+  
+
+}
+
+
+
+odd_honeycrisp_final<- NULL
+for (i in odd_honeycrisp) {
+  ii <- gsub('.{11}$', '', i)
+  row <- read.csv(i, header=TRUE, strip.white = TRUE)
+  row$radius.in.mm <- row$radius.in.mm * 1000
+  row_ontree <- row[row$height.off.ground > 0,]
+  row_ontree_true <- subset(row_ontree, in.calibration.sample == "True")
+  
+  
+  iii <- as.numeric(strsplit(ii, "\\D+")[[1]][-1])
+  iii <- iii+1
+  iii <- paste(gsub("\\d+", "", ii), iii, sep="")
+  
+  
+  set.seed(101)
+  cal <- calibration[calibration$name == iii,]
+  # Using ordinary bootstrap
+  r_dis_mean <- as.numeric(cal[,c(18,19,20,21)]) %>% 
+    new_r(type = "continuous") %>% 
+    form_estimate(stat = mean, sample_size = cal[,3])
+  
+  
+  ci <- summ_quantile(r_dis_mean,probs = c(.05,.95))
+  
+  row_ontree$ratio_est_top <- ci[1]
+  row_ontree$ratio_est_bottom <- ci[2]
+  row_ontree$ratio_est <- r_dis_mean(nrow(row_ontree))
+  row_ontree$height_est <- (row_ontree$radius.in.mm * row_ontree$ratio_est)
+  row_ontree$height_est_top <- (row_ontree$radius.in.mm * row_ontree$ratio_est_top)
+  row_ontree$height_est_bottom <- (row_ontree$radius.in.mm * row_ontree$ratio_est_bottom)
+  
+  row_ontree$volume <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est)
+  row_ontree$volume_top <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est_top)
+  row_ontree$volume_bottom <- ((4/3) * pi * row_ontree$radius.in.mm * row_ontree$radius.in.mm * row_ontree$height_est_bottom)
+  row_ontree$name <- ii
+  odd_honeycrisp_final <- rbind(odd_honeycrisp_final, row_ontree)
+  
+  
+}
+
+
+
+#Weight calc
+
+odd_honeycrisp_final$weight <- (odd_honeycrisp_final$volume/1000) * .8
+odd_gala_final$weight <- (odd_gala_final$volume/1000) * .8
+even_honeycrisp_final$weight <- (even_honeycrisp_final$volume/1000) * .8
+even_gala_final$weight <- (even_gala_final$volume/1000) * .8
+
+
+odd_honeycrisp_final$weight_top <- (odd_honeycrisp_final$volume_top/1000) * .8
+odd_gala_final$weight_top <- (odd_gala_final$volume_top/1000) * .8
+even_honeycrisp_final$weight_top <- (even_honeycrisp_final$volume_top/1000) * .8
+even_gala_final$weight_top <- (even_gala_final$volume_top/1000) * .8
+
+
+odd_honeycrisp_final$weight_bottom <- (odd_honeycrisp_final$volume_bottom/1000) * .8
+odd_gala_final$weight_bottom <- (odd_gala_final$volume_bottom/1000) * .8
+even_honeycrisp_final$weight_bottom <- (even_honeycrisp_final$volume_bottom/1000) * .8
+even_gala_final$weight_bottom <- (even_gala_final$volume_bottom/1000) * .8
+
+
+finaldata <- rbind(odd_honeycrisp_final, odd_gala_final, even_honeycrisp_final, even_gala_final)
+
+weight <- aggregate(finaldata$weight, by=list(finaldata$name), FUN = "sum")
+weight_top <- aggregate(finaldata$weight_top, by=list(finaldata$name), FUN = "sum")
+weight_bottom <- aggregate(finaldata$weight_bottom, by=list(finaldata$name), FUN = "sum")
+
+finalweight <- cbind(weight, weight_top[,2], weight_bottom[,2])
+colnames(finalweight) <- c("name", "weight", "weight_top", "weight_bottom")
+
+
+finalweight$index <- c(1,10,11,12,17,18,2,3,4,9,13,14,15,16,5,6,7,8)
+finalweight <- finalweight[order(finalweight$index), ]
+
+finalweight$weight_kg <- finalweight$weight/1000
+finalweight$weight_top_kg <- finalweight$weight_top/1000
+finalweight$weight_bottom_kg <- finalweight$weight_bottom/1000
+
+finalweight$weight_lbs <- finalweight$weight/453.59237
+finalweight$weight_top_lbs <- finalweight$weight_top/453.59237
+finalweight$weight_bottom_lbs <- finalweight$weight_bottom/453.59237
+
+# 
+# 
+# plot(finalweight$weight)
+# lines(finalweight$weight, col="black")
+# points(finalweight$weight_top, col = "red")
+# lines(finalweight$weight_top, col = "red")
+# points(finalweight$weight_bottom, col = "red")
+# lines(finalweight$weight_bottom, col = "red")
+
+
+
+
+plot(finalweight$weight_lbs,  xlab = "", main="Total apples weight per row (lbs)",  ylab="LBS", axes=FALSE)
+axis(side = 1, c(1:18), c(as.character(finalweight$name)), las=2)
+axis(side = 2, at = c(2000,4000,6000,8000,10000,12000,14000))
+box()
+
+lines(finalweight$weight_lbs, col="black")
+points(finalweight$weight_top_lbs, col = "red")
+lines(finalweight$weight_top_lbs, col = "red")
+points(finalweight$weight_bottom_lbs, col = "red")
+lines(finalweight$weight_bottom_lbs, col = "red")
+
+
+
+
+
+row.names(finalweight) <- finalweight$index
+
+gala_finalweight <- finalweight[c(1,2,3,4,9,10,11,12,17,18),]
+
+
+# 
+# plot(gala_finalweight$weight_lbs, ylim=c(2000, 15000), main="GALA total apples weight per row (lbs)", xlab = "rows", ylab="LBS")
+# lines(gala_finalweight$weight_lbs, col="black")
+# points(gala_finalweight$weight_top_lbs, col = "red")
+# lines(gala_finalweight$weight_top_lbs, col = "red")
+# points(gala_finalweight$weight_bottom_lbs, col = "red")
+# lines(gala_finalweight$weight_bottom_lbs, col = "red")
+
+
+honeycrisp_finalweight <- finalweight[c(5,6,7,8,9,11,12,13,4),]
+
+
+# 
+# plot(honeycrisp_finalweight$weight_lbs, ylim=c(2000, 15000), main="HONEYCRISP total apples weight per row (lbs)",  xlab = "rows", ylab="LBS")
+# axis(side = 1, c(1:9), c(as.character(honeycrisp_finalweight$name)), las=2)
+# 
+# lines(honeycrisp_finalweight$weight_lbs, col="black")
+# points(honeycrisp_finalweight$weight_top_lbs, col = "red")
+# lines(honeycrisp_finalweight$weight_top_lbs, col = "red")
+# points(honeycrisp_finalweight$weight_bottom_lbs, col = "red")
+# lines(honeycrisp_finalweight$weight_bottom_lbs, col = "red")
+# 
+
+
+
+honeycrisp_totals_lbs <- cbind(sum(honeycrisp_finalweight$weight_lbs), sum(honeycrisp_finalweight$weight_top_lbs), sum(honeycrisp_finalweight$weight_bottom_lbs))
+gala_totals_lbs <- cbind(sum(gala_finalweight$weight_lbs), sum(gala_finalweight$weight_top_lbs), sum(gala_finalweight$weight_bottom_lbs))
+finalweight_lbs <-  cbind(sum(finalweight$weight_lbs), sum(finalweight$weight_top_lbs), sum(finalweight$weight_bottom_lbs))
+
+
+
+
+
+
+```
+\newpage
+
+```{r}
+
+library(knitr)
+
+kable(finalweight[, c(1,8:10)])
+
+
+all_table <- data.frame(colSums(finalweight[c(9:11)]))
+colnames(all_table) <- c("gala and honeycrisp")
+kable(all_table)
+
+honeycrisp_table <- data.frame(colSums(honeycrisp_finalweight[c(9:11)]))
+colnames(honeycrisp_table) <- c("honeycrisp")
+kable(honeycrisp_table)
+
+
+gala_table <- data.frame(colSums(gala_finalweight[c(9:11)]))
+colnames(gala_table) <- c("gala")
+kable(gala_table)
+```
